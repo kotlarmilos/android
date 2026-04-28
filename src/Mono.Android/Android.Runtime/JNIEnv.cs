@@ -27,9 +27,12 @@ namespace Android.Runtime {
 		static Array ArrayCreateInstance (Type elementType, int length)
 		{
 			if (RuntimeFeature.TrimmableTypeMap) {
-				var factory = TrimmableTypeMap.Instance?.GetContainerFactory (elementType);
-				if (factory is not null)
-					return factory.CreateArray (length, 1);
+				if (TrimmableTypeMap.Instance.TryGetArrayType (elementType, out var arrayType)) {
+					return Array.CreateInstanceFromArrayType (arrayType, length);
+				}
+				throw new NotSupportedException (
+					$"No TrimmableTypeMap array entry for element type '{elementType}'. " +
+					$"Add an [assembly: TypeMap] entry for the closed array type or report an issue.");
 			}
 
 			#pragma warning disable IL3050 // Array.CreateInstance is not AOT-safe, but this is the legacy fallback path

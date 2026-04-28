@@ -53,6 +53,11 @@ sealed class SingleUniverseTypeMap : ITypeMapWithAliasing
 		}
 	}
 
+	public bool TryGetType (string jniName, [NotNullWhen (true)] out Type? type)
+	{
+		return _typeMap.TryGetValue (jniName, out type);
+	}
+
 	public bool TryGetProxyType (Type managedType, [NotNullWhen (true)] out Type? proxyType)
 	{
 		if (!_proxyTypeMap.TryGetValue (managedType, out var mappedProxyType)) {

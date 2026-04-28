@@ -26,4 +26,14 @@ interface ITypeMapWithAliasing
 	/// carries the <see cref="JavaPeerProxy"/> attribute).
 	/// </summary>
 	bool TryGetProxyType (Type managedType, [NotNullWhen (true)] out Type? proxyType);
+
+	/// <summary>
+	/// Raw lookup of a managed type by JNI name, without the
+	/// <see cref="JavaPeerProxy"/> attribute filtering applied by
+	/// <see cref="GetTypes"/>. Used by the AOT-safe array creation path,
+	/// where the typemap entry points directly at a closed array
+	/// <see cref="Type"/> (e.g. <c>typeof(byte[][])</c>) that has no
+	/// proxy attribute.
+	/// </summary>
+	bool TryGetType (string jniName, [NotNullWhen (true)] out Type? type);
 }

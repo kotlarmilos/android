@@ -30,6 +30,19 @@ sealed class AggregateTypeMap : ITypeMapWithAliasing
 		}
 	}
 
+	public bool TryGetType (string jniName, [NotNullWhen (true)] out Type? type)
+	{
+		// First-wins: each JNI name appears in at most one universe (or is duplicated
+		// across universes with the same target — order-independent).
+		foreach (var universe in _universes) {
+			if (universe.TryGetType (jniName, out type)) {
+				return true;
+			}
+		}
+		type = null;
+		return false;
+	}
+
 	public bool TryGetProxyType (Type managedType, [NotNullWhen (true)] out Type? proxyType)
 	{
 		// First-wins: each managed type exists in exactly one assembly

@@ -40,6 +40,14 @@ static class ModelBuilder
 	/// <param name="peers">Scanned Java peer types (typically from a single input assembly).</param>
 	/// <param name="outputPath">Output .dll path — used to derive assembly/module names if not specified.</param>
 	/// <param name="assemblyName">Explicit assembly name. If null, derived from <paramref name="outputPath"/>.</param>
+	/// <remarks>
+	/// In addition to the per-peer <c>TypeMap</c> entry, this method also emits speculative
+	/// <c>[L&lt;jni&gt;;</c>, <c>[[L&lt;jni&gt;;</c>, and <c>[[[L&lt;jni&gt;;</c> entries pointing at
+	/// the corresponding closed managed array types (<c>T[]</c>, <c>T[][]</c>, <c>T[][][]</c>).
+	/// They are 3-arg (conditional) attributes, so the trimmer drops entries whose array
+	/// target type is not live in the shipped app. Required for the AOT-safe array creation
+	/// path in <c>JNIEnv.ArrayCreateInstance</c>.
+	/// </remarks>
 	public static TypeMapAssemblyData Build (IReadOnlyList<JavaPeerInfo> peers, string outputPath, string? assemblyName = null)
 	{
 		if (peers is null) {
@@ -89,6 +97,7 @@ static class ModelBuilder
 			}
 
 			EmitPeers (model, jniName, peersForName, assemblyName, usedProxyNames);
+			EmitArrayEntries (model, jniName, peersForName);
 		}
 
 		// Compute IgnoresAccessChecksTo from cross-assembly references
@@ -197,6 +206,76 @@ static class ModelBuilder
 			AliasKeys = aliasKeys,
 		});
 	}
+
+	/// <summary>
+	/// Maximum jagged-array rank emitted per peer. Matches the legacy
+	/// <c>JavaPeerContainerFactory&lt;T&gt;.CreateArray</c> switch (ranks 1–3) — higher ranks
+	/// already throw <see cref="NotSupportedException"/> under NativeAOT today.
+	/// </summary>
+	const int MaxArrayRank = 3;
+
+	/// <summary>
+	/// Emits speculative <c>[L&lt;jni&gt;;</c> / <c>[[L&lt;jni&gt;;</c> / <c>[[[L&lt;jni&gt;;</c> TypeMap entries
+	/// for a single peer. Each entry maps a JNI array name to the corresponding closed
+	/// managed array type (e.g. <c>typeof(SomePeer[])</c>) and is emitted as a 3-arg
+	/// (conditional) attribute so the trimmer can drop entries whose array target type is
+	/// not live in the shipped app.
+	/// </summary>
+	/// <remarks>
+	/// Skips:
+	///   <list type="bullet">
+	///     <item>Open-generic peers (<c>JavaPeerInfo.IsGenericDefinition</c>) — <c>typeof(T&lt;&gt;[])</c> is invalid.</item>
+	///     <item>JNI keyword keys (<c>Z</c>, <c>B</c>, …) — primitives are handled by
+	///       <c>JniRuntime.JniTypeManager.GetPrimitiveArrayTypesForSimpleReference</c>; emitting
+	///       array entries here would collide with that built-in path.</item>
+	///     <item>Alias groups — multiple peers sharing a JNI name would produce duplicate
+	///       array-key entries. Array-typemap support for aliases would need its own
+	///       indexed-alias scheme; deferred until a real-world need is identified.</item>
+	///   </list>
+	/// </remarks>
+	static void EmitArrayEntries (TypeMapAssemblyData model, string jniName, List<JavaPeerInfo> peersForName)
+	{
+		// Primitive single-letter JNI keywords are handled by the legacy primitive path.
+		// Skip them so we don't shadow the built-in [Z, [B, etc. array entries.
+		if (jniName.Length == 1 && IsJniPrimitiveKeyword (jniName [0])) {
+			return;
+		}
+
+		// Alias groups would produce duplicate JNI array keys (one per peer). Defer
+		// alias-aware array emission until we have a concrete use case.
+		if (peersForName.Count != 1) {
+			return;
+		}
+
+		var peer = peersForName [0];
+		if (peer.IsGenericDefinition) {
+			return;
+		}
+
+		for (int rank = 1; rank <= MaxArrayRank; rank++) {
+			string arrayJniName = string.Concat (new string ('[', rank), "L", jniName, ";");
+			string arrayTargetRef = AssemblyQualify (peer.ManagedTypeName + Brackets (rank), peer.AssemblyName);
+			model.Entries.Add (new TypeMapAttributeData {
+				JniName = arrayJniName,
+				ProxyTypeReference = arrayTargetRef,
+				TargetTypeReference = arrayTargetRef,
+			});
+		}
+	}
+
+	static string Brackets (int rank)
+	{
+		switch (rank) {
+		case 1: return "[]";
+		case 2: return "[][]";
+		case 3: return "[][][]";
+		default: return new string ('[', rank).Replace ("[", "[]");
+		}
+	}
+
+	static bool IsJniPrimitiveKeyword (char c)
+		=> c == 'Z' || c == 'B' || c == 'C' || c == 'S' || c == 'I'
+			|| c == 'J' || c == 'F' || c == 'D' || c == 'V';
 
 	/// <summary>
 	/// Determines whether a type should use the unconditional (2-arg) TypeMap attribute.

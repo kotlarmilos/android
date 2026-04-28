@@ -318,6 +318,88 @@ public class TrimmableTypeMap
 		return GetProxyForManagedType (type)?.GetContainerFactory ();
 	}
 
+	/// <summary>
+	/// AOT-safe lookup of the closed array <see cref="Type"/> for the supplied
+	/// <paramref name="elementType"/> via the trimmable typemap. Implements the
+	/// flow:
+	///   <list type="number">
+	///     <item>Walk down <see cref="Type.IsArray"/> / <see cref="Type.GetElementType"/>
+	///       to find the leaf element type and the depth of array nesting.</item>
+	///     <item>Resolve the leaf JNI element encoding — primitive (<c>byte</c> →
+	///       <c>"B"</c>, etc.) or reference (<see cref="TryGetJniNameForManagedType"/>
+	///       wrapped as <c>"L&lt;jni&gt;;"</c>).</item>
+	///     <item>Build the full JNI array name by prepending <c>'['</c> for each
+	///       array level (the outer rank that is being created plus the depth of
+	///       the element type itself).</item>
+	///     <item>Look the array Type up via the raw typemap (<see cref="ITypeMapWithAliasing.TryGetType"/>),
+	///       which bypasses proxy attribute filtering — array entries point directly
+	///       at the closed managed array <see cref="Type"/> and have no
+	///       <see cref="JavaPeerProxy"/>.</item>
+	///   </list>
+	/// Returns false if any step fails (unknown leaf type, no typemap entry).
+	/// </summary>
+	internal bool TryGetArrayType (Type elementType, [NotNullWhen (true)] out Type? arrayType)
+	{
+		if (elementType is null) {
+			arrayType = null;
+			return false;
+		}
+
+		// 1. Walk down to the leaf and count the element's own array depth.
+		var leaf = elementType;
+		int elementDepth = 0;
+		while (leaf.IsArray) {
+			var next = leaf.GetElementType ();
+			if (next is null) {
+				arrayType = null;
+				return false;
+			}
+			leaf = next;
+			elementDepth++;
+		}
+
+		// 2. Resolve the leaf JNI element encoding.
+		string leafEncoding;
+		if (leaf.IsPrimitive) {
+			if (!TryGetPrimitiveJniEncoding (leaf, out var primitive)) {
+				arrayType = null;
+				return false;
+			}
+			leafEncoding = primitive;
+		} else {
+			if (!TryGetJniNameForManagedType (leaf, out var leafJni)) {
+				arrayType = null;
+				return false;
+			}
+			leafEncoding = "L" + leafJni + ";";
+		}
+
+		// 3. Build the full JNI array name. The "+1" accounts for the outer rank
+		//    being created by the caller (ArrayCreateInstance(elementType, length)
+		//    creates new elementType[length]).
+		int totalArrayDepth = elementDepth + 1;
+		string arrayJniName = string.Concat (new string ('[', totalArrayDepth), leafEncoding);
+
+		// 4. Raw typemap lookup — no proxy filtering.
+		return _typeMap.TryGetType (arrayJniName, out arrayType);
+	}
+
+	static bool TryGetPrimitiveJniEncoding (Type primitive, [NotNullWhen (true)] out string? encoding)
+	{
+		// JNI single-letter encodings for primitive types.
+		// Reference: https://docs.oracle.com/javase/8/docs/technotes/guides/jni/spec/types.html
+		if (primitive == typeof (bool))   { encoding = "Z"; return true; }
+		if (primitive == typeof (byte))   { encoding = "B"; return true; }
+		if (primitive == typeof (char))   { encoding = "C"; return true; }
+		if (primitive == typeof (short))  { encoding = "S"; return true; }
+		if (primitive == typeof (int))    { encoding = "I"; return true; }
+		if (primitive == typeof (long))   { encoding = "J"; return true; }
+		if (primitive == typeof (float))  { encoding = "F"; return true; }
+		if (primitive == typeof (double)) { encoding = "D"; return true; }
+		encoding = null;
+		return false;
+	}
+
 	[UnmanagedCallersOnly]
 	static void OnRegisterNatives (IntPtr jnienv, IntPtr klass, IntPtr nativeClassHandle)
 	{

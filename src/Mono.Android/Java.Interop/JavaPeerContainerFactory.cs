@@ -10,17 +10,25 @@ using Android.Runtime;
 namespace Java.Interop
 {
 	/// <summary>
-	/// AOT-safe factory for creating typed containers (lists, collections, dictionaries)
-	/// without using <c>MakeGenericType()</c>.
+	/// AOT-safe factory for creating typed containers (arrays, lists, collections, dictionaries)
+	/// without using <c>MakeGenericType()</c> or <c>Array.CreateInstance()</c>.
 	/// </summary>
 	/// <remarks>
-	/// Array creation has been moved out of this factory: <c>JNIEnv.ArrayCreateInstance</c>
-	/// now resolves closed array types via the trimmable typemap and
-	/// <see cref="Array.CreateInstanceFromArrayType"/> instead of going through a per-T
-	/// factory instantiation.
+	/// Array creation is still routed through this factory because the planned
+	/// <c>JNIEnv.ArrayCreateInstance</c> + <c>Array.CreateInstanceFromArrayType</c>
+	/// path requires speculative <c>[L&lt;jni&gt;;</c> <c>TypeMap</c> attribute
+	/// entries that ILLink's <c>TypeMapHandler</c> currently cannot process
+	/// (<c>NotSupportedException</c> on <c>Mono.Cecil.ArrayType</c>).
+	/// <see cref="Microsoft.Android.Runtime.TrimmableTypeMap.TryGetArrayType"/> is
+	/// in place for the future swap once the ILLink limitation is resolved.
 	/// </remarks>
 	public abstract class JavaPeerContainerFactory
 	{
+		/// <summary>
+		/// Creates a typed jagged array. Rank 1 = T[], rank 2 = T[][], etc.
+		/// </summary>
+		internal abstract Array CreateArray (int length, int rank);
+
 		/// <summary>
 		/// Creates a typed <c>JavaList&lt;T&gt;</c> from a JNI handle.
 		/// </summary>
@@ -71,6 +79,35 @@ namespace Java.Interop
 		internal static readonly JavaPeerContainerFactory<T> Instance = new ();
 
 		JavaPeerContainerFactory () { }
+
+		// TODO (https://github.com/dotnet/android/issues/10794): This might cause unnecessary code bloat for NativeAOT. Revisit
+		// how we use this API and instead use a differnet approach that uses AOT-safe `Array.CreateInstanceFromArrayType`
+		// with statically provided array types based on a statically known array type.
+		// (See PR #11238 and the ILLink limitation it documents — the planned typemap-based
+		// approach is already wired in via `TrimmableTypeMap.TryGetArrayType` but cannot
+		// be activated until ILLink learns to handle `Mono.Cecil.ArrayType` in
+		// `TypeMapAttribute`.)
+		internal override Array CreateArray (int length, int rank) => rank switch {
+			1 => new T [length],
+			2 => new T [length][],
+			3 => new T [length][][],
+			_ when rank >= 0 => CreateHigherRankArray (length, rank),
+			_ => throw new ArgumentOutOfRangeException (nameof (rank), rank, "Rank must be non-negative."),
+		};
+
+		static Array CreateHigherRankArray (int length, int rank)
+		{
+			if (!RuntimeFeature.IsDynamicCodeSupported) {
+				throw new NotSupportedException ($"Cannot create array of rank {rank} because dynamic code is not supported.");
+			}
+
+			var arrayType = typeof (T);
+			for (int i = 0; i < rank; i++) {
+				arrayType = arrayType.MakeArrayType ();
+			}
+
+			return Array.CreateInstanceFromArrayType (arrayType, length);
+		}
 
 		internal override IList CreateList (IntPtr handle, JniHandleOwnership transfer)
 			=> new Android.Runtime.JavaList<T> (handle, transfer);

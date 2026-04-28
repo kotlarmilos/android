@@ -778,20 +778,16 @@ public class ModelBuilderTests : FixtureTestBase
 		[Fact]
 		public void FullPipeline_Mixed2ArgAnd3Arg_BothSurviveRoundTrip ()
 		{
-			// With ForceUnconditionalEntries, both peer entries are emitted as 2-arg unconditional.
-			// In addition, ModelBuilder emits speculative 3-arg conditional array entries (ranks 1-3)
-			// per non-aliased peer, which also round-trip through the PE blob.
+			// With ForceUnconditionalEntries, both are emitted as 2-arg unconditional
 			var objectPeer = FindFixtureByJavaName ("java/lang/Object");
 			var activityPeer = FindFixtureByJavaName ("android/app/Activity");
 
 			var model = BuildModel (new [] { objectPeer, activityPeer }, "MixedBlob");
-			Assert.Equal (2, NonArrayEntries (model).Count);
-			// 2 peers × 3 array ranks = 6 speculative array entries; total 2 + 6 = 8.
-			Assert.Equal (8, model.Entries.Count);
+			Assert.Equal (2, model.Entries.Count);
 
 			EmitAndVerify (model, "MixedBlob", (pe, reader) => {
 				var attrs = ReadAllTypeMapAttributeBlobs (reader);
-				Assert.Equal (8, attrs.Count);
+				Assert.Equal (2, attrs.Count);
 
 				var objectEntry = attrs.FirstOrDefault (a => a.jniName == "java/lang/Object");
 				Assert.NotNull (objectEntry.jniName);
@@ -800,11 +796,6 @@ public class ModelBuilderTests : FixtureTestBase
 				var activityEntry = attrs.FirstOrDefault (a => a.jniName == "android/app/Activity");
 				Assert.NotNull (activityEntry.jniName);
 				Assert.Null (activityEntry.targetRef); // unconditional due to ForceUnconditionalEntries
-
-				// Spot-check that array entries also survive the round trip.
-				Assert.Contains (attrs, a => a.jniName == "[Landroid/app/Activity;");
-				Assert.Contains (attrs, a => a.jniName == "[[Landroid/app/Activity;");
-				Assert.Contains (attrs, a => a.jniName == "[[[Landroid/app/Activity;");
 			});
 		}
 
@@ -857,90 +848,15 @@ public class ModelBuilderTests : FixtureTestBase
 
 	public class ArrayEntries
 	{
+		// EmitArrayEntries is currently a no-op (see ModelBuilder.EmitArrayEntries
+		// remarks — blocked by an ILLink TypeMapHandler limitation around
+		// Mono.Cecil.ArrayType). These tests pin that behavior so we know if it
+		// changes back.
+
 		[Fact]
-		public void Build_SinglePeer_EmitsRanks1Through3 ()
+		public void Build_DoesNotEmitArrayEntries_PendingILLinkFix ()
 		{
 			var peer = MakeMcwPeer ("foo/Bar", "Foo.Bar", "App");
-			var model = BuildModel (new [] { peer });
-
-			Assert.Equal ("[Lfoo/Bar;",   model.Entries.Single (e => e.JniName == "[Lfoo/Bar;").JniName);
-			Assert.Equal ("[[Lfoo/Bar;",  model.Entries.Single (e => e.JniName == "[[Lfoo/Bar;").JniName);
-			Assert.Equal ("[[[Lfoo/Bar;", model.Entries.Single (e => e.JniName == "[[[Lfoo/Bar;").JniName);
-		}
-
-		[Fact]
-		public void Build_ArrayEntries_PointAtClosedManagedArrayTypes ()
-		{
-			var peer = MakeMcwPeer ("foo/Bar", "Foo.Bar", "App");
-			var model = BuildModel (new [] { peer });
-
-			var rank1 = model.Entries.Single (e => e.JniName == "[Lfoo/Bar;");
-			Assert.Equal ("Foo.Bar[], App", rank1.ProxyTypeReference);
-			Assert.Equal ("Foo.Bar[], App", rank1.TargetTypeReference);
-
-			var rank2 = model.Entries.Single (e => e.JniName == "[[Lfoo/Bar;");
-			Assert.Equal ("Foo.Bar[][], App", rank2.ProxyTypeReference);
-			Assert.Equal ("Foo.Bar[][], App", rank2.TargetTypeReference);
-
-			var rank3 = model.Entries.Single (e => e.JniName == "[[[Lfoo/Bar;");
-			Assert.Equal ("Foo.Bar[][][], App", rank3.ProxyTypeReference);
-			Assert.Equal ("Foo.Bar[][][], App", rank3.TargetTypeReference);
-		}
-
-		[Fact]
-		public void Build_ArrayEntries_AreConditional ()
-		{
-			// Array entries must be conditional (3-arg) so the trimmer can drop
-			// entries whose target array type is not live in the shipped app.
-			var peer = MakeMcwPeer ("foo/Bar", "Foo.Bar", "App");
-			var model = BuildModel (new [] { peer });
-
-			foreach (var arrayEntry in model.Entries.Where (e => e.JniName.StartsWith ("[", StringComparison.Ordinal))) {
-				Assert.False (arrayEntry.IsUnconditional, $"Array entry {arrayEntry.JniName} must be conditional (3-arg)");
-				Assert.NotNull (arrayEntry.TargetTypeReference);
-			}
-		}
-
-		[Fact]
-		public void Build_OpenGenericPeer_DoesNotEmitArrayEntries ()
-		{
-			// typeof(JavaList<>[]) is invalid, so open generics must be skipped.
-			var openGeneric = MakeMcwPeer ("java/util/ArrayList", "Android.Runtime.JavaList`1", "Mono.Android")
-				with { IsGenericDefinition = true };
-			var model = BuildModel (new [] { openGeneric });
-
-			Assert.DoesNotContain (model.Entries, e => e.JniName.StartsWith ("[", StringComparison.Ordinal));
-		}
-
-		[Fact]
-		public void Build_AliasGroup_DoesNotEmitArrayEntries ()
-		{
-			// Alias groups (multiple peers sharing one JNI name) would produce duplicate
-			// JNI array keys; they're skipped pending an alias-aware design.
-			var peers = new List<JavaPeerInfo> {
-				MakeMcwPeer ("test/Dup", "Test.First", "App"),
-				MakeMcwPeer ("test/Dup", "Test.Second", "App"),
-			};
-			var model = BuildModel (peers);
-
-			Assert.DoesNotContain (model.Entries, e => e.JniName.StartsWith ("[", StringComparison.Ordinal));
-		}
-
-		[Theory]
-		[InlineData ("Z")]
-		[InlineData ("B")]
-		[InlineData ("C")]
-		[InlineData ("S")]
-		[InlineData ("I")]
-		[InlineData ("J")]
-		[InlineData ("F")]
-		[InlineData ("D")]
-		public void Build_PrimitiveJniKeyword_DoesNotEmitArrayEntries (string jniKeyword)
-		{
-			// Primitive JNI keyword keys (Z, B, C, S, I, J, F, D) are handled by the legacy
-			// JniRuntime.JniTypeManager.GetPrimitiveArrayTypesForSimpleReference path. Emitting
-			// array entries here would shadow that built-in handling.
-			var peer = MakeMcwPeer (jniKeyword, "FakePrimitive.Wrapper", "App");
 			var model = BuildModel (new [] { peer });
 
 			Assert.DoesNotContain (model.Entries, e => e.JniName.StartsWith ("[", StringComparison.Ordinal));

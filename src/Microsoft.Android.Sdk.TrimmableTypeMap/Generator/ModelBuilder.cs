@@ -215,52 +215,24 @@ static class ModelBuilder
 	const int MaxArrayRank = 3;
 
 	/// <summary>
-	/// Emits speculative <c>[L&lt;jni&gt;;</c> / <c>[[L&lt;jni&gt;;</c> / <c>[[[L&lt;jni&gt;;</c> TypeMap entries
-	/// for a single peer. Each entry maps a JNI array name to the corresponding closed
-	/// managed array type (e.g. <c>typeof(SomePeer[])</c>) and is emitted as a 3-arg
-	/// (conditional) attribute so the trimmer can drop entries whose array target type is
-	/// not live in the shipped app.
+	/// (Disabled — see remarks.) Would emit speculative <c>[L&lt;jni&gt;;</c> /
+	/// <c>[[L&lt;jni&gt;;</c> / <c>[[[L&lt;jni&gt;;</c> TypeMap entries pointing at closed
+	/// managed array types so <c>JNIEnv.ArrayCreateInstance</c> could resolve arrays
+	/// via <see cref="Array.CreateInstanceFromArrayType"/> instead of through
+	/// <c>JavaPeerContainerFactory&lt;T&gt;</c>.
 	/// </summary>
 	/// <remarks>
-	/// Skips:
-	///   <list type="bullet">
-	///     <item>Open-generic peers (<c>JavaPeerInfo.IsGenericDefinition</c>) — <c>typeof(T&lt;&gt;[])</c> is invalid.</item>
-	///     <item>JNI keyword keys (<c>Z</c>, <c>B</c>, …) — primitives are handled by
-	///       <c>JniRuntime.JniTypeManager.GetPrimitiveArrayTypesForSimpleReference</c>; emitting
-	///       array entries here would collide with that built-in path.</item>
-	///     <item>Alias groups — multiple peers sharing a JNI name would produce duplicate
-	///       array-key entries. Array-typemap support for aliases would need its own
-	///       indexed-alias scheme; deferred until a real-world need is identified.</item>
-	///   </list>
+	/// Currently a no-op. Speculative emission is blocked by an ILLink limitation:
+	/// <c>Mono.Linker.TypeMapHandler</c> calls <c>LinkContext.Resolve</c> on the
+	/// <c>TargetType</c> slot of every <c>TypeMapAttribute</c>, which throws
+	/// <c>NotSupportedException ("TypeDefinition cannot be resolved from
+	/// 'Mono.Cecil.ArrayType' type")</c> for closed array types. This affects both
+	/// 2-arg and 3-arg forms — there is no <c>TypeMapAttribute</c> shape that
+	/// accepts an array <see cref="Type"/> today.
 	/// </remarks>
 	static void EmitArrayEntries (TypeMapAssemblyData model, string jniName, List<JavaPeerInfo> peersForName)
 	{
-		// Primitive single-letter JNI keywords are handled by the legacy primitive path.
-		// Skip them so we don't shadow the built-in [Z, [B, etc. array entries.
-		if (jniName.Length == 1 && IsJniPrimitiveKeyword (jniName [0])) {
-			return;
-		}
-
-		// Alias groups would produce duplicate JNI array keys (one per peer). Defer
-		// alias-aware array emission until we have a concrete use case.
-		if (peersForName.Count != 1) {
-			return;
-		}
-
-		var peer = peersForName [0];
-		if (peer.IsGenericDefinition) {
-			return;
-		}
-
-		for (int rank = 1; rank <= MaxArrayRank; rank++) {
-			string arrayJniName = string.Concat (new string ('[', rank), "L", jniName, ";");
-			string arrayTargetRef = AssemblyQualify (peer.ManagedTypeName + Brackets (rank), peer.AssemblyName);
-			model.Entries.Add (new TypeMapAttributeData {
-				JniName = arrayJniName,
-				ProxyTypeReference = arrayTargetRef,
-				TargetTypeReference = arrayTargetRef,
-			});
-		}
+		// Intentionally empty. See remarks above.
 	}
 
 	static string Brackets (int rank)

@@ -26,13 +26,16 @@ namespace Android.Runtime {
 
 		static Array ArrayCreateInstance (Type elementType, int length)
 		{
+			// TODO: when the ILLink limitation around array types in TypeMap
+			// attributes is resolved, switch this to use
+			// TrimmableTypeMap.TryGetArrayType + Array.CreateInstanceFromArrayType
+			// (the helpers are already in place) and remove
+			// JavaPeerContainerFactory<T>.CreateArray. Today the speculative array
+			// TypeMap emission crashes ILLink, so we keep using the per-T factory.
 			if (RuntimeFeature.TrimmableTypeMap) {
-				if (TrimmableTypeMap.Instance.TryGetArrayType (elementType, out var arrayType)) {
-					return Array.CreateInstanceFromArrayType (arrayType, length);
-				}
-				throw new NotSupportedException (
-					$"No TrimmableTypeMap array entry for element type '{elementType}'. " +
-					$"Add an [assembly: TypeMap] entry for the closed array type or report an issue.");
+				var factory = TrimmableTypeMap.Instance?.GetContainerFactory (elementType);
+				if (factory is not null)
+					return factory.CreateArray (length, 1);
 			}
 
 			#pragma warning disable IL3050 // Array.CreateInstance is not AOT-safe, but this is the legacy fallback path
